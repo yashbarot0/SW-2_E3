@@ -9,7 +9,7 @@ $(TARGET): poisson_solver_rma.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(AX_TARGET): ax.c
-    $(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
 	rm -f $(TARGET) $(AX_TARGET)
