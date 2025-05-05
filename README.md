@@ -1,14 +1,15 @@
-# Poisson Solver with RMA-based Ghost Exchange
+# Q1 Poisson Solver with RMA-based Ghost Exchange
 
-This project implements a 2D Poisson equation solver using a 5-point stencil finite difference method with a 2D processor decomposition. The key feature is the implementation of ghost/halo exchanges using MPI's Remote Memory Access (RMA) operations instead of traditional message passing.
+Implementation of a 2D Poisson equation solver using a 5-point stencil finite difference method with a 2D processor decomposition. 
+The key feature is the implementation of ghost/halo exchanges using MPI's Remote Memory Access (RMA) operations instead of traditional message passing.
 
 ## Features
 
 - 2D domain decomposition for parallel processing
 - Three ghost/halo exchange methods:
-  1. Traditional MPI message passing (Send/Recv)
-  2. RMA with MPI_Win_fence synchronization
-  3. RMA with general active target synchronization (MPI_Win_start, MPI_Win_complete, MPI_Win_post, MPI_Win_wait)
+	  1. Traditional MPI message passing (Send/Recv)
+	  2. RMA with MPI_Win_fence synchronization
+	  3. RMA with general active target synchronization (MPI_Win_start, MPI_Win_complete, MPI_Win_post, MPI_Win_wait)
 - Jacobi iteration for solving the Poisson equation
 - Performance timing for comparing different communication methods
 
@@ -43,7 +44,9 @@ Where:
   - 1: RMA with MPI_Win_fence synchronization
   - 2: RMA with general active target synchronization
 
-## Examples
+
+
+## How to Run the Code
 
 Run with MPI message passing:
 ```bash
@@ -63,6 +66,22 @@ make run_gats
 Run all tests with a smaller grid for quick comparison:
 ```bash
 make test_all
+```
+
+
+## Expected Output
+
+For each run, we see output similar to:
+
+```
+Iteration 100, Residual: 1.234567e-04
+...
+Solution converged after X iterations with residual Y.YYYYYYe-ZZ
+Grid size: 100 x 100, Processor grid: 2 x 2
+Exchange method: N (METHOD_NAME)
+Setup time: 0.XXXX s
+Solve time: Y.YYYY s
+Total time: Z.ZZZZ s
 ```
 
 ## Understanding the Output
@@ -104,53 +123,98 @@ The program uses Jacobi iteration to solve the discretized Poisson equation:
 
 ### Efficiency Comparison
 
-You can compare the performance of the three ghost exchange methods by running the program with different exchange_method values. Generally, RMA operations can be more efficient than traditional message passing in certain communication patterns, but actual performance depends on hardware, MPI implementation, and problem characteristics.
+Generally, RMA operations can be more efficient than traditional message passing in certain communication patterns,  the traditional point-to-point communication (Send/Recv) outperformed the one-sided communication methods for this particular problem size and configuration. This might be unexpected, but its performance depends heavily on the specific implementation, hardware, and problem characteristics.
 
-
-
-
-
-Common Parameters:
-
-Grid size: 64×64 points
-Maximum iterations: 1000
-Using 4 MPI processes arranged in a 2×2 processor grid
-Each run shows convergence behavior with residual values printed every 100 iterations
-
-
-Three Communication Methods Compared:
-
-Standard MPI Send/Recv (method 0)
-One-sided RMA (Remote Memory Access) with fence synchronization (method 1)
-One-sided RMA with general active target synchronization (method 2)
-
-
-Results for Each Method:
-
-All methods achieved identical numerical results (same residual values)
-The solution converged after 1000 iterations with a final residual of 2.300506e+00
+All methods achieved identical numerical results. The solution converged after 1000 iterations with a final residual of 2.300506e+00
 Performance varied between methods:
 
 Standard MPI: 0.0057s solve time (fastest)
 RMA fence: 0.0188s solve time (slowest)
 RMA general active target: 0.0174s solve time
-
-
-
-
-Performance Comparison:
+### Performance Comparison:
 
 Traditional MPI Send/Recv was about 3.3× faster than the RMA methods
 The RMA general active target was slightly faster than RMA fence
 
 
-
-This output demonstrates that while all three communication methods produce identical numerical results, the traditional point-to-point communication (Send/Recv) outperformed the one-sided communication methods for this particular problem size and configuration. This might be unexpected since RMA is often assumed to be more efficient, but its performance depends heavily on the specific implementation, hardware, and problem characteristics.
-For this small problem size (64×64 grid), the overhead of setting up RMA windows and synchronization likely outweighed any potential benefits of the one-sided communication model.
+---
 
 
-mpicc -o ax ax.c
-mpirun -np 4 ./ax
 
+# Q2 Read Matrix and do a Matrix-Vector Product
+### **Part 1: Reading Matrix and Vector with MPI-IO**
+1. **Matrix File (mat-d20-b5-p4.bin):**
+    - **Format:**        
+        - First 4 bytes: integer 20 (dimension of Matrix).
+        - Subsequent data: 4 block columns, each containing four 5x5 blocks (100 doubles total per block column).
+    - **Reading:**
+        - Each process reads its block column starting at offset 4 + rank * 100 * sizeof(double).
+2. **Vector File (x-d20.txt.bin):**
+    - **Format:**
+        - First 4 bytes: integer 20 (vector length).
+        - Subsequent data: 20 doubles.
+    - **Reading:**
+        - Each process reads 5 elements starting at offset 4 + rank * 5 * sizeof(double).
 
+### **Part 2: Matrix-Vector Product**
+- **Local Computation:**
+    - Each process multiplies its 20x5 block column with its 5-element vector segment.
+- **Global Sum:**    
+    - Use `MPI_Reduce` to sum local results into the final 20-element vector on rank 0.
+
+### **Verification**
+1. **Compile and Run:**
+    - Use `mpicc -o ax ax.c` and run with 4 processes.
+2. **Compare with Python/Matlab:**
+    - Construct the full matrix and vector from the given data, compute `Ax`, and ensure the results match.
+
+### **README Instructions**
+- **Compile:** `make` (ensure a Makefile is provided).
+- **Run:** `mpirun -np 4 ./ax`.
+- **Output:** The result vector is printed by rank 0. Compare with reference implementation.
+	Ax = [235.0 252.0 282.0 316.0 194.0 226.0 263.0 189.0 210.0 192.0 130.0 147.0 163.0 188.0 254.0 245.0 191.0 187.0 197.0 221.0 ]
+
+### **Python Code for Verification**
+```python
+import numpy as np
+
+def read_matrix_file(filename):
+    """Read the matrix file in the specified block column format."""
+    with open(filename, 'rb') as f:
+        dim = np.fromfile(f, dtype=np.int32, count=1)[0]
+        data = np.fromfile(f, dtype=np.float64)
+    
+    # Reshape into 4 block columns (each 20x5 = 100 elements)
+    block_columns = []
+    for bc in range(4):
+        # Extract data for this block column
+        bc_data = data[bc*100 : (bc+1)*100]
+        # Split into four 5x5 blocks and vertically stack
+        blocks = [bc_data[i*25 : (i+1)*25].reshape(5, 5) for i in range(4)]
+        block_col = np.vstack(blocks)  # Shape: 20x5
+        block_columns.append(block_col)
+    
+    # Horizontally stack block columns to form 20x20 matrix
+    return np.hstack(block_columns)
+
+def read_vector_file(filename):
+    """Read the vector file."""
+    with open(filename, 'rb') as f:
+        dim = np.fromfile(f, dtype=np.int32, count=1)[0]
+        x = np.fromfile(f, dtype=np.float64)
+    return x
+
+# Read data
+A = read_matrix_file('mat-d20-b5-p4.bin')
+x = read_vector_file('x-d20.txt.bin')
+
+# Compute Ax
+Ax = A @ x
+
+print("Result using Python:")
+print(Ax)
+```
+
+Result using Python: Ax=[235. 252. 282. 316. 194. 226. 263. 189. 210. 192. 130. 147. 163. 188. 254. 245. 191. 187. 197. 221.]
+and  our C **Output:** result vector is printed by rank 0 are same.
 Ax = [235.0 252.0 282.0 316.0 194.0 226.0 263.0 189.0 210.0 192.0 130.0 147.0 163.0 188.0 254.0 245.0 191.0 187.0 197.0 221.0 ]
