@@ -149,3 +149,8 @@ This output demonstrates that while all three communication methods produce iden
 For this small problem size (64×64 grid), the overhead of setting up RMA windows and synchronization likely outweighed any potential benefits of the one-sided communication model.
 
 
+mpicc -o ax ax.c
+mpirun -np 4 ./ax
+
+
+Ax = [235.0 252.0 282.0 316.0 194.0 226.0 263.0 189.0 210.0 192.0 130.0 147.0 163.0 188.0 254.0 245.0 191.0 187.0 197.0 221.0 ]
