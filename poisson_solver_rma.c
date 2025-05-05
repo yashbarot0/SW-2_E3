@@ -119,13 +119,24 @@
      
      if (exchange_method > 0) {
          // Allocate window memory for RMA operations (includes ghost cells)
-         win_mem = (double *)malloc((local_rows + 2) * (local_cols + 2) * sizeof(double));
-         MPI_Win_create(win_mem, (local_rows + 2) * (local_cols + 2) * sizeof(double), 
-                       sizeof(double), MPI_INFO_NULL, cart_comm, &win);
+         size_t local_size = (local_rows + 2) * (local_cols + 2) * sizeof(double);
+         win_mem = (double *)malloc(local_size);
+         if (win_mem == NULL) {
+             fprintf(stderr, "Error: Failed to allocate window memory\n");
+             MPI_Abort(MPI_COMM_WORLD, 1);
+         }
+         
+         MPI_Win_create(win_mem, local_size, sizeof(double), 
+                       MPI_INFO_NULL, cart_comm, &win);
          
          // For general active target sync, collect list of neighbors
          if (exchange_method == 2) {
              neighbors = (int *)malloc(4 * sizeof(int));
+             if (neighbors == NULL) {
+                 fprintf(stderr, "Error: Failed to allocate neighbors array\n");
+                 MPI_Abort(MPI_COMM_WORLD, 1);
+             }
+             
              if (north != MPI_PROC_NULL) neighbors[num_neighbors++] = north;
              if (south != MPI_PROC_NULL) neighbors[num_neighbors++] = south;
              if (east != MPI_PROC_NULL) neighbors[num_neighbors++] = east;
@@ -145,12 +156,8 @@
          if (exchange_method == 0) {
              exchange_halos_mpi(u_new, local_rows, local_cols, col_type);
          } else if (exchange_method == 1) {
-             // Copy data to window memory
-             memcpy(win_mem, &u_new[0][0], (local_rows + 2) * (local_cols + 2) * sizeof(double));
-             exchange_halos_rma_fence(u_new, local_rows, local_cols, win, win_mem);
+                 exchange_halos_rma_fence(u_new, local_rows, local_cols, win, win_mem);
          } else {
-             // Copy data to window memory
-             memcpy(win_mem, &u_new[0][0], (local_rows + 2) * (local_cols + 2) * sizeof(double));
              exchange_halos_rma_gats(u_new, local_rows, local_cols, win, win_mem, neighbors, num_neighbors);
          }
          
@@ -219,9 +226,19 @@
      *u_new = (double **)malloc(local_rows * sizeof(double *));
      *f = (double **)malloc(local_rows * sizeof(double *));
      
+     if (*u == NULL || *u_new == NULL || *f == NULL) {
+         fprintf(stderr, "Error: Failed to allocate array pointers\n");
+         MPI_Abort(MPI_COMM_WORLD, 1);
+     }
+     
      double *u_data = (double *)calloc(local_rows * local_cols, sizeof(double));
      double *u_new_data = (double *)calloc(local_rows * local_cols, sizeof(double));
      double *f_data = (double *)calloc(local_rows * local_cols, sizeof(double));
+     
+     if (u_data == NULL || u_new_data == NULL || f_data == NULL) {
+         fprintf(stderr, "Error: Failed to allocate array data\n");
+         MPI_Abort(MPI_COMM_WORLD, 1);
+     }
      
      for (int i = 0; i < local_rows; i++) {
          (*u)[i] = &u_data[i * local_cols];
@@ -349,8 +366,15 @@
  void exchange_halos_rma_fence(double **u, int local_rows, int local_cols, MPI_Win win, double *win_mem) {
      int local_size = (local_rows + 2) * (local_cols + 2);
      
-     // Start RMA epoch
-     MPI_Win_fence(0, win);
+     // Copy local array to window memory
+     for (int i = 0; i <= local_rows + 1; i++) {
+         for (int j = 0; j <= local_cols + 1; j++) {
+             win_mem[i * (local_cols + 2) + j] = u[i][j];
+         }
+     }
+     
+     // Ensure all local operations are done before starting RMA
+     MPI_Win_fence(MPI_MODE_NOPRECEDE, win);
      
      // Put data to neighbors
      if (north != MPI_PROC_NULL) {
@@ -382,10 +406,14 @@
      }
      
      // End RMA epoch and synchronize
-     MPI_Win_fence(0, win);
+     MPI_Win_fence(MPI_MODE_NOSUCCEED, win);
      
      // Copy data from win_mem back to u
-     memcpy(&u[0][0], win_mem, local_size * sizeof(double));
+     for (int i = 0; i <= local_rows + 1; i++) {
+         for (int j = 0; j <= local_cols + 1; j++) {
+             u[i][j] = win_mem[i * (local_cols + 2) + j];
+         }
+     }
  }
  
  /**
@@ -394,12 +422,44 @@
  void exchange_halos_rma_gats(double **u, int local_rows, int local_cols, MPI_Win win, double *win_mem, 
                             int *neighbors, int num_neighbors) {
      int local_size = (local_rows + 2) * (local_cols + 2);
+     MPI_Group world_group, origin_group, target_group;
+     
+     // Create groups for origin (processes that will access the window) and
+     // target (processes whose windows will be accessed)
+     MPI_Comm_group(cart_comm, &world_group);
+     
+     // All neighbors whose data we need 
+     int origin_neighbors[4] = {MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL};
+     int origin_count = 0;
+     if (north != MPI_PROC_NULL) origin_neighbors[origin_count++] = north;
+     if (south != MPI_PROC_NULL) origin_neighbors[origin_count++] = south;
+     if (east != MPI_PROC_NULL) origin_neighbors[origin_count++] = east;
+     if (west != MPI_PROC_NULL) origin_neighbors[origin_count++] = west;
+     
+     // All neighbors who need our data
+     int target_neighbors[4] = {MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL};
+     int target_count = 0;
+     if (north != MPI_PROC_NULL) target_neighbors[target_count++] = north;
+     if (south != MPI_PROC_NULL) target_neighbors[target_count++] = south;
+     if (east != MPI_PROC_NULL) target_neighbors[target_count++] = east;
+     if (west != MPI_PROC_NULL) target_neighbors[target_count++] = west;
+     
+     // Create groups from neighbor lists
+     MPI_Group_incl(world_group, origin_count, origin_neighbors, &origin_group);
+     MPI_Group_incl(world_group, target_count, target_neighbors, &target_group);
+     
+     // Copy local array to window memory
+     for (int i = 0; i <= local_rows + 1; i++) {
+         for (int j = 0; j <= local_cols + 1; j++) {
+             win_mem[i * (local_cols + 2) + j] = u[i][j];
+         }
+     }
      
      // Start exposure epoch with neighbors - allowing them to access our window
-     MPI_Win_post(MPI_GROUP_EMPTY, 0, win);
+     MPI_Win_post(target_group, 0, win);
      
      // Start access epoch to neighbors - allowing us to access their windows
-     MPI_Win_start(MPI_GROUP_EMPTY, 0, win);
+     MPI_Win_start(origin_group, 0, win);
      
      // Put data to neighbors
      if (north != MPI_PROC_NULL) {
@@ -437,7 +497,16 @@
      MPI_Win_wait(win);
      
      // Copy data from win_mem back to u
-     memcpy(&u[0][0], win_mem, local_size * sizeof(double));
+     for (int i = 0; i <= local_rows + 1; i++) {
+         for (int j = 0; j <= local_cols + 1; j++) {
+             u[i][j] = win_mem[i * (local_cols + 2) + j];
+         }
+     }
+     
+     // Free groups
+     MPI_Group_free(&origin_group);
+     MPI_Group_free(&target_group);
+     MPI_Group_free(&world_group);
  }
  
  /**
